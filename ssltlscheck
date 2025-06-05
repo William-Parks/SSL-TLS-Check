@@ -1,0 +1,101 @@
+#!/bin/bash
+
+show_help() {
+    echo "Usage: $0 [-o outputfile] [-h]"
+    echo
+    echo "Options:"
+    echo "  -o outputfile   Save output to the specified file (output is also shown on the terminal)"
+    echo "  -h              Show this help message and exit"
+    echo
+    echo "The script checks each website in a user-specified file for common SSL/TLS and SSH weaknesses."
+    echo "Enjoy - William P."
+
+}
+
+output_file=""
+
+while getopts ":o:h" opt; do
+  case $opt in
+    o)
+      output_file="$OPTARG"
+      ;;
+    h)
+      show_help
+      exit 0
+      ;;
+    \?)
+      echo "Invalid option: -$OPTARG" >&2
+      show_help
+      exit 1
+      ;;
+    :)
+      echo "Option -$OPTARG requires an argument." >&2
+      show_help
+      exit 1
+      ;;
+  esac
+done
+
+shift $((OPTIND -1))
+
+read -p "Enter the filename containing the list of websites: " website_file
+
+if [ ! -f "$website_file" ]; then
+    echo "File not found: $website_file"
+    exit 1
+fi
+
+run_checks() {
+    while read -r site; do
+        echo "=== $site ==="
+        host="${site%%:*}"
+        port="${site##*:}"
+        [ "$host" = "$port" ] && port=443
+
+        # SWEET32 (3DES) check
+        echo -n "SWEET32 (3DES) supported: "
+        openssl s_client -connect "$host:$port" -cipher "DES-CBC3-SHA" < /dev/null 2>&1 | grep -q "Cipher is (NONE)" && echo "NO" || echo "YES"
+
+        # TLS 1.0 support
+        echo -n "TLS 1.0 supported: "
+        echo | openssl s_client -connect "$host:$port" -tls1 2>&1 | grep -q "Protocol  : TLSv1" && echo "YES" || echo "NO"
+
+        # TLS 1.1 support
+        echo -n "TLS 1.1 supported: "
+        echo | openssl s_client -connect "$host:$port" -tls1_1 2>&1 | grep -q "Protocol  : TLSv1.1" && echo "YES" || echo "NO"
+
+        # SSL RC4 support
+        echo -n "RC4 cipher supported: "
+        openssl s_client -connect "$host:$port" -cipher "RC4" < /dev/null 2>&1 | grep -q "Cipher is (NONE)" && echo "NO" || echo "YES"
+
+        # Weak cipher suites (NULL, EXPORT, LOW)
+        echo -n "Weak cipher suites supported: "
+        openssl s_client -connect "$host:$port" -cipher "NULL,EXPORT,LOW" < /dev/null 2>&1 | grep -q "Cipher is (NONE)" && echo "NO" || echo "YES"
+
+        # SSL Certificate Expiry and Trust
+        echo -n "SSL Certificate expiry: "
+        end_date=$(echo | openssl s_client -servername "$host" -connect "$host:$port" 2>/dev/null | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2)
+        if [ -n "$end_date" ]; then
+            expiry_seconds=$(date -d "$end_date" +%s)
+            now_seconds=$(date +%s)
+            days_left=$(( (expiry_seconds - now_seconds) / 86400 ))
+            echo "$end_date ($days_left days left)"
+        else
+            echo "Could not retrieve certificate"
+        fi
+
+        echo -n "SSL Certificate trusted: "
+        echo | openssl s_client -connect "$host:$port" 2>&1 | grep -q "Verify return code: 0 (ok)" && echo "YES" || echo "NO"
+
+        echo
+    done < "$website_file"
+}
+
+if [ -n "$output_file" ]; then
+    echo "Saving output to $output_file"
+    echo
+    run_checks | tee "$output_file"
+else
+    run_checks
+fi
+
